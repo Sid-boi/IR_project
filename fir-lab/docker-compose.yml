@@ -1,0 +1,80 @@
+# FIR Lab — three-service stack
+#
+# Before the first run:
+#   mkdir data runs
+#   cp .env.example .env
+#   unzip data01.zip -d data/
+#   docker compose up -d --build
+#
+# The data/ and runs/ folders MUST exist before you start. Docker will create
+# them if missing, but on Linux it creates them owned by root and the notebooks
+# then cannot write run files into runs/.
+
+services:
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION:-7.17.28}
+    container_name: fir-es
+    environment:
+      - discovery.type=single-node        # no cluster overhead
+      - xpack.security.enabled=false      # local only — never do this in prod
+      - xpack.ml.enabled=false            # skip ML node, saves ~400MB RAM
+      - ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms1g -Xmx1g}
+    mem_limit: ${ES_MEM_LIMIT:-2g}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20          # ES 7 is slow to start — give it ~3 min
+      start_period: 30s
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ES_VERSION:-7.17.28}
+    container_name: fir-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    restart: unless-stopped
+
+  workbench:
+    build: ./workbench
+    container_name: fir-workbench
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - ES_INDEX=${ES_INDEX:-medline}
+      - ES_INDEX_ENRICHED=${ES_INDEX_ENRICHED:-medline_enriched}
+    volumes:
+      - ./data:/work/data              # corpus + queries + qrels (you provide)
+      - ./runs:/work/runs              # run files and plots (generated)
+      - ./notebooks:/work/notebooks    # Jupyter notebooks
+      - ./scripts:/work/scripts        # experiment scripts
+    working_dir: /work
+    ports:
+      - "8888:8888"
+    command: >
+      jupyter notebook
+        --ip=0.0.0.0
+        --port=8888
+        --no-browser
+        --allow-root
+        --NotebookApp.token=''
+        --NotebookApp.password=''
+        --notebook-dir=/work/notebooks
+    restart: unless-stopped
+
+volumes:
+  es-data:    # ES index survives `docker compose down` (not `down -v`)
